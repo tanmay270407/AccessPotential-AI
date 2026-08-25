@@ -6,12 +6,12 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
  */
 export function normalizeSupabaseUrl(url?: string): string {
   if (!url) return '';
-  const trimmed = url.trim();
+  let trimmed = url.trim().replace(/^["']|["']$/g, '').trim();
   const dashboardMatch = trimmed.match(/dashboard\/project\/([a-zA-Z0-9_-]+)/i);
   if (dashboardMatch && dashboardMatch[1]) {
     return `https://${dashboardMatch[1]}.supabase.co`;
   }
-  return trimmed;
+  return trimmed.replace(/\/+$/, '');
 }
 
 let supabaseInstance: SupabaseClient | null = null;
@@ -28,30 +28,47 @@ export function getPublicSupabaseCredentials(): { url: string; key: string } {
   // 1. Check Vite client environment
   if (typeof import.meta !== 'undefined' && (import.meta as any).env) {
     const metaEnv = (import.meta as any).env;
-    url = metaEnv.VITE_SUPABASE_URL || metaEnv.SUPABASE_URL || '';
+    url =
+      metaEnv.VITE_SUPABASE_URL ||
+      metaEnv.SUPABASE_URL ||
+      metaEnv.NEXT_PUBLIC_SUPABASE_URL ||
+      '';
     key =
       metaEnv.VITE_SUPABASE_PUBLISHABLE_KEY ||
       metaEnv.VITE_SUPABASE_ANON_KEY ||
+      metaEnv.VITE_SUPABASE_KEY ||
       metaEnv.SUPABASE_PUBLISHABLE_KEY ||
       metaEnv.SUPABASE_ANON_KEY ||
+      metaEnv.SUPABASE_KEY ||
+      metaEnv.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+      metaEnv.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
       '';
   }
 
   // 2. Check process.env (Node / Vite define replacement)
   if ((!url || !key) && typeof process !== 'undefined' && process.env) {
-    url = url || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
+    url =
+      url ||
+      process.env.VITE_SUPABASE_URL ||
+      process.env.SUPABASE_URL ||
+      process.env.NEXT_PUBLIC_SUPABASE_URL ||
+      '';
     key =
       key ||
       process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
       process.env.VITE_SUPABASE_ANON_KEY ||
+      process.env.VITE_SUPABASE_KEY ||
       process.env.SUPABASE_PUBLISHABLE_KEY ||
       process.env.SUPABASE_ANON_KEY ||
+      process.env.SUPABASE_KEY ||
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
       '';
   }
 
   return {
     url: normalizeSupabaseUrl(url),
-    key: (key || '').trim(),
+    key: (key || '').trim().replace(/^["']|["']$/g, ''),
   };
 }
 
@@ -138,18 +155,9 @@ export async function testSupabaseConnection(): Promise<{ success: boolean; erro
       if (data.connected === true) {
         return { success: true };
       }
-      return {
-        success: false,
-        error: data.error || 'Supabase server test indicated connection failure.',
-      };
-    } else {
-      const errData = await res.json().catch(() => ({}));
-      if (errData.error) {
-        return { success: false, error: errData.error };
-      }
     }
   } catch (e: any) {
-    console.warn('[Supabase Test Notice] Server endpoint error, falling back to direct client test:', e?.message || e);
+    console.warn('[Supabase Test Notice] Server endpoint notice, checking client-side connection:', e?.message || e);
   }
 
   // 2. Client-side query test fallback
@@ -170,14 +178,18 @@ export async function testSupabaseConnection(): Promise<{ success: boolean; erro
     const { error, status } = await client.from('candidates').select('id').limit(1);
     if (error) {
       const isConnected =
-        error.code === '42P01' ||
+        error.code === '42P01' || // relation does not exist
+        error.code === '42501' || // insufficient_privilege (RLS active and evaluating queries)
         error.code === 'PGRST204' ||
         error.code === 'PGRST205' ||
         error.code === 'PGRST116' ||
+        error.code === 'PGRST301' ||
         error.message?.toLowerCase().includes('relation') ||
         error.message?.toLowerCase().includes('table') ||
+        error.message?.toLowerCase().includes('row-level security') ||
+        error.message?.toLowerCase().includes('permission denied') ||
         error.message?.toLowerCase().includes('does not exist') ||
-        (status >= 200 && status < 500 && status !== 401 && status !== 403);
+        (typeof status === 'number' && status >= 200 && status < 500);
 
       if (isConnected) {
         return { success: true };

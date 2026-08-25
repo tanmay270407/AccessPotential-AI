@@ -99,9 +99,21 @@ export const CandidateProfileScreen: React.FC<CandidateProfileScreenProps> = ({
     handleChange('supportNeeds', next);
   };
 
+  const detectMimeType = (file: File): string => {
+    const name = (file.name || '').toLowerCase();
+    if (name.endsWith('.pdf')) return 'application/pdf';
+    if (name.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    if (name.endsWith('.doc')) return 'application/msword';
+    if (name.endsWith('.pptx')) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+    if (name.endsWith('.ppt')) return 'application/vnd.ms-powerpoint';
+    if (name.endsWith('.txt')) return 'text/plain';
+    return file.type || 'application/octet-stream';
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || !e.target.files[0]) return;
     const file = e.target.files[0];
+    const detectedMime = detectMimeType(file);
     
     // Step 1: Start analysis
     setAnalysisState('analyzing');
@@ -111,7 +123,7 @@ export const CandidateProfileScreen: React.FC<CandidateProfileScreenProps> = ({
     try {
       // Read file content
       const reader = new FileReader();
-      const isTextFile = file.name.endsWith('.txt') || file.type.includes('text');
+      const isTextFile = file.name.endsWith('.txt') || file.type.includes('text') || detectedMime === 'text/plain';
 
       reader.onload = async () => {
         let fileText = '';
@@ -140,7 +152,7 @@ export const CandidateProfileScreen: React.FC<CandidateProfileScreenProps> = ({
               fileName: file.name,
               fileText,
               base64Data,
-              mimeType: file.type || 'application/pdf',
+              mimeType: detectedMime,
             }),
           });
 
@@ -189,7 +201,7 @@ export const CandidateProfileScreen: React.FC<CandidateProfileScreenProps> = ({
               ...formData,
               resumeFileName: file.name,
               resumeFileBase64: base64Data,
-              resumeFileMimeType: file.type || (isTextFile ? 'text/plain' : 'application/pdf'),
+              resumeFileMimeType: detectedMime,
               name: extracted?.fullName || extracted?.name || '',
               education: extracted?.education || '',
               experience: extracted?.experience || '',

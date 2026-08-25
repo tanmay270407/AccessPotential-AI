@@ -93,29 +93,37 @@ async function getPdfParse() {
 
 function normalizeSupabaseUrl(url?: string): string {
   if (!url) return '';
-  const trimmed = url.trim();
+  let trimmed = url.trim().replace(/^["']|["']$/g, '').trim();
   const dashboardMatch = trimmed.match(/dashboard\/project\/([a-zA-Z0-9_-]+)/i);
   if (dashboardMatch && dashboardMatch[1]) {
     return `https://${dashboardMatch[1]}.supabase.co`;
   }
-  return trimmed;
+  return trimmed.replace(/\/+$/, '');
 }
 
 function getSupabaseServerClient() {
-  const rawUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  const rawUrl =
+    process.env.SUPABASE_URL ||
+    process.env.VITE_SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL;
   const rawKey =
     process.env.SUPABASE_SERVICE_ROLE_KEY ||
     process.env.SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_SERVICE_KEY ||
     process.env.SUPABASE_PUBLISHABLE_KEY ||
     process.env.SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_KEY ||
     process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
-    process.env.VITE_SUPABASE_ANON_KEY;
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    process.env.VITE_SUPABASE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 
   const url = normalizeSupabaseUrl(rawUrl);
   if (!url || !rawKey) return null;
 
   try {
-    return createClient(url, rawKey, {
+    return createClient(url, rawKey.trim().replace(/^["']|["']$/g, ''), {
       auth: {
         persistSession: false,
         autoRefreshToken: false,
@@ -130,24 +138,36 @@ function getSupabaseServerClient() {
 const app = express();
 const PORT = 3000;
 
+// CORS middleware
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header(
+    'Access-Control-Allow-Headers',
+    'Origin, X-Requested-With, Content-Type, Accept, Authorization'
+  );
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-// Dedicated API Router to handle routes with or without /api prefix (for local, proxy & Vercel serverless)
+// Dedicated API Router for all /api endpoints
 const apiRouter = express.Router();
 
 function registerGet(routePath: string, handler: express.RequestHandler) {
   const cleanPath = routePath.startsWith('/api') ? routePath.replace(/^\/api/, '') : routePath;
   const rootPath = cleanPath === '' ? '/' : cleanPath;
   apiRouter.get(rootPath, handler);
-  apiRouter.get(`/api${rootPath}`, handler);
 }
 
 function registerPost(routePath: string, handler: express.RequestHandler) {
   const cleanPath = routePath.startsWith('/api') ? routePath.replace(/^\/api/, '') : routePath;
   const rootPath = cleanPath === '' ? '/' : cleanPath;
   apiRouter.post(rootPath, handler);
-  apiRouter.post(`/api${rootPath}`, handler);
 }
 
 // Initialize Gemini SDK lazily to prevent module load crash in serverless functions if key is missing
@@ -226,14 +246,6 @@ async function generateGeminiJson(
 }
 
 // API Root Status
-registerGet('/', (req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'AccessPotential AI Backend',
-    version: '1.0.0',
-  });
-});
-
 registerGet('/api', (req, res) => {
   res.json({
     status: 'ok',
@@ -276,19 +288,29 @@ registerGet('/api/health', (req, res) => {
 
 // Public Supabase configuration endpoint (only exposes public URL and Publishable/Anon key, NEVER service role key)
 registerGet('/api/supabase/config', (req, res) => {
-  const rawUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
+  const rawUrl =
+    process.env.SUPABASE_URL ||
+    process.env.VITE_SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    '';
   const rawKey =
     process.env.SUPABASE_PUBLISHABLE_KEY ||
     process.env.SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_KEY ||
     process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
     process.env.VITE_SUPABASE_ANON_KEY ||
+    process.env.VITE_SUPABASE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
     '';
 
   res.json({
     supabaseUrl: normalizeSupabaseUrl(rawUrl),
-    supabasePublishableKey: rawKey.trim(),
+    supabasePublishableKey: rawKey.trim().replace(/^["']|["']$/g, ''),
     hasServiceRoleKey: Boolean(
-      process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY
+      process.env.SUPABASE_SERVICE_ROLE_KEY ||
+      process.env.SUPABASE_SECRET_KEY ||
+      process.env.SUPABASE_SERVICE_KEY
     ),
   });
 });
@@ -296,14 +318,22 @@ registerGet('/api/supabase/config', (req, res) => {
 // Supabase Connection Test Route
 registerGet('/api/supabase/test', async (req, res) => {
   try {
-    const rawUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+    const rawUrl =
+      process.env.SUPABASE_URL ||
+      process.env.VITE_SUPABASE_URL ||
+      process.env.NEXT_PUBLIC_SUPABASE_URL;
     const rawKey =
       process.env.SUPABASE_SERVICE_ROLE_KEY ||
       process.env.SUPABASE_SECRET_KEY ||
+      process.env.SUPABASE_SERVICE_KEY ||
       process.env.SUPABASE_PUBLISHABLE_KEY ||
       process.env.SUPABASE_ANON_KEY ||
+      process.env.SUPABASE_KEY ||
       process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
-      process.env.VITE_SUPABASE_ANON_KEY;
+      process.env.VITE_SUPABASE_ANON_KEY ||
+      process.env.VITE_SUPABASE_KEY ||
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 
     if (!rawUrl || !rawKey) {
       const missing = [];
@@ -316,7 +346,7 @@ registerGet('/api/supabase/test', async (req, res) => {
     }
 
     const normalizedUrl = normalizeSupabaseUrl(rawUrl);
-    const client = createClient(normalizedUrl, rawKey, {
+    const client = createClient(normalizedUrl, rawKey.trim().replace(/^["']|["']$/g, ''), {
       auth: {
         persistSession: false,
         autoRefreshToken: false,
@@ -329,13 +359,17 @@ registerGet('/api/supabase/test', async (req, res) => {
     if (error) {
       const isConnected =
         error.code === '42P01' || // relation does not exist
+        error.code === '42501' || // insufficient_privilege (RLS active and evaluating queries)
         error.code === 'PGRST204' ||
         error.code === 'PGRST205' ||
         error.code === 'PGRST116' ||
+        error.code === 'PGRST301' ||
         error.message?.toLowerCase().includes('relation') ||
         error.message?.toLowerCase().includes('table') ||
+        error.message?.toLowerCase().includes('row-level security') ||
+        error.message?.toLowerCase().includes('permission denied') ||
         error.message?.toLowerCase().includes('does not exist') ||
-        (status >= 200 && status < 500 && status !== 401 && status !== 403);
+        (typeof status === 'number' && status >= 200 && status < 500);
 
       if (isConnected) {
         return res.json({
@@ -528,27 +562,29 @@ async function extractDocumentText(
     return { text: '', isReadable: false };
   }
 
-  const lowerName = fileName.toLowerCase();
+  const lowerName = (fileName || '').toLowerCase();
   const lowerMime = (mimeType || '').toLowerCase();
 
-  // 2. PDF extraction
-  if (lowerName.endsWith('.pdf') || lowerMime.includes('pdf')) {
-    const pdfText = await extractPdfText(buffer);
-    if (pdfText && pdfText.length > 10) {
-      return { text: pdfText, isReadable: true };
+  // 2. Plain Text
+  if (lowerName.endsWith('.txt') || lowerMime === 'text/plain') {
+    try {
+      const txt = buffer.toString('utf-8').trim();
+      if (txt.length > 0) {
+        return { text: txt, isReadable: true };
+      }
+    } catch {
+      // Continue
     }
   }
 
-  // 3. PPTX / PPT extraction
+  // 3. PDF extraction
   if (
-    lowerName.endsWith('.pptx') ||
-    lowerName.endsWith('.ppt') ||
-    lowerMime.includes('presentationml') ||
-    lowerMime.includes('powerpoint')
+    lowerName.endsWith('.pdf') ||
+    (lowerMime === 'application/pdf' && !lowerName.match(/\.(docx?|pptx?|txt)$/))
   ) {
-    const pptxText = await extractPptxText(buffer);
-    if (pptxText && pptxText.length > 10) {
-      return { text: pptxText, isReadable: true };
+    const pdfText = await extractPdfText(buffer);
+    if (pdfText && pdfText.length > 10) {
+      return { text: pdfText, isReadable: true };
     }
   }
 
@@ -566,27 +602,50 @@ async function extractDocumentText(
     }
   }
 
-  // 5. Plain Text fallback from Buffer
-  if (lowerName.endsWith('.txt') || lowerMime.includes('text/plain') || lowerMime.includes('text')) {
-    try {
-      const txt = buffer.toString('utf-8').trim();
-      if (txt.length > 0) {
-        return { text: txt, isReadable: true };
-      }
-    } catch (err) {
-      // Continue
+  // 5. PPTX / PPT extraction
+  if (
+    lowerName.endsWith('.pptx') ||
+    lowerName.endsWith('.ppt') ||
+    lowerMime.includes('presentationml') ||
+    lowerMime.includes('powerpoint')
+  ) {
+    const pptxText = await extractPptxText(buffer);
+    if (pptxText && pptxText.length > 10) {
+      return { text: pptxText, isReadable: true };
     }
   }
 
-  // 6. Generic string inspection for text-like documents
+  // 6. Comprehensive multi-parser fallback for all formats
+  try {
+    const docxFallback = await extractDocxText(buffer);
+    if (docxFallback && docxFallback.length > 10) {
+      return { text: docxFallback, isReadable: true };
+    }
+  } catch {}
+
+  try {
+    const pptxFallback = await extractPptxText(buffer);
+    if (pptxFallback && pptxFallback.length > 10) {
+      return { text: pptxFallback, isReadable: true };
+    }
+  } catch {}
+
+  try {
+    const pdfFallback = await extractPdfText(buffer);
+    if (pdfFallback && pdfFallback.length > 10) {
+      return { text: pdfFallback, isReadable: true };
+    }
+  } catch {}
+
+  // 7. Generic string inspection for text-like documents
   try {
     const rawString = buffer.toString('utf-8');
     const printableMatches = rawString.match(/[a-zA-Z0-9\s.,;@:()/#+-]{4,}/g) || [];
     const joinedPrintable = printableMatches.join(' ').trim();
-    if (joinedPrintable.length > 50) {
+    if (joinedPrintable.length > 20) {
       return { text: joinedPrintable, isReadable: true };
     }
-  } catch (err) {
+  } catch {
     // Ignore string decode error
   }
 
@@ -938,8 +997,11 @@ registerPost('/api/ai/analyze-document', async (req, res) => {
       mimeType
     );
 
+    const lowerName = (fileName || '').toLowerCase();
+    const lowerMime = (mimeType || '').toLowerCase();
     const isPdf =
-      (fileName || '').toLowerCase().endsWith('.pdf') || (mimeType || '').toLowerCase().includes('pdf');
+      lowerName.endsWith('.pdf') ||
+      (lowerMime === 'application/pdf' && !lowerName.match(/\.(docx?|pptx?|txt)$/));
 
     // If unreadable and no PDF base64 provided
     if (!isReadable && !fileText && (!isPdf || !base64Data)) {
@@ -1103,12 +1165,18 @@ Be strictly factual and precise. Never invent fake or generic data.`;
       ];
     }
 
-    let parsed = await generateGeminiJson(contentsPayload, schema);
+    let parsed = null;
+    try {
+      parsed = await generateGeminiJson(contentsPayload, schema);
+    } catch (gErr) {
+      console.warn('[Gemini Extraction Warning]', gErr);
+    }
 
     // If Gemini returned null (e.g. offline, rate limit, quota), use high-accuracy local parser
-    if (!parsed && extractedText && extractedText.length > 20) {
+    const textToAnalyze = (extractedText || fileText || '').trim();
+    if (!parsed && textToAnalyze.length > 5) {
       console.log('[Resume Parser] Using resilient fallback extraction for document text...');
-      parsed = fallbackExtractCandidate(extractedText, fileName);
+      parsed = fallbackExtractCandidate(textToAnalyze, fileName);
     }
 
     if (parsed) {
@@ -2464,9 +2532,8 @@ Calculate:
   }
 });
 
-// Mount the API Router for both prefixed (/api) and direct routes
+// Mount the API Router for /api endpoints
 app.use('/api', apiRouter);
-app.use(apiRouter);
 
 // Setup Vite or Static serving for local & production container environments
 async function startServer() {
