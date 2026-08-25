@@ -1,0 +1,8 @@
+{
+  "name": "AccessPotential AI",
+  "description": "AI-powered workplace-readiness and job-success platform: from job matching to success matching.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
