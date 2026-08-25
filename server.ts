@@ -2,7 +2,6 @@ import express from 'express';
 import path from 'path';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type } from '@google/genai';
-import { createServer as createViteServer } from 'vite';
 import { createClient } from '@supabase/supabase-js';
 import mammoth from 'mammoth';
 import JSZip from 'jszip';
@@ -72,6 +71,23 @@ const PORT = 3000;
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
+// Dedicated API Router to handle routes with or without /api prefix (for local, proxy & Vercel serverless)
+const apiRouter = express.Router();
+
+function registerGet(routePath: string, handler: express.RequestHandler) {
+  const cleanPath = routePath.startsWith('/api') ? routePath.replace(/^\/api/, '') : routePath;
+  const rootPath = cleanPath === '' ? '/' : cleanPath;
+  apiRouter.get(rootPath, handler);
+  apiRouter.get(`/api${rootPath}`, handler);
+}
+
+function registerPost(routePath: string, handler: express.RequestHandler) {
+  const cleanPath = routePath.startsWith('/api') ? routePath.replace(/^\/api/, '') : routePath;
+  const rootPath = cleanPath === '' ? '/' : cleanPath;
+  apiRouter.post(rootPath, handler);
+  apiRouter.post(`/api${rootPath}`, handler);
+}
+
 // Initialize Gemini SDK
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
@@ -134,7 +150,7 @@ async function generateGeminiJson(
 }
 
 // API Routes
-app.get('/api/health', (req, res) => {
+registerGet('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
@@ -153,7 +169,7 @@ app.get('/api/health', (req, res) => {
 });
 
 // Public Supabase configuration endpoint (only exposes public URL and Publishable/Anon key, NEVER service role key)
-app.get('/api/supabase/config', (req, res) => {
+registerGet('/api/supabase/config', (req, res) => {
   const rawUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
   const rawKey =
     process.env.SUPABASE_PUBLISHABLE_KEY ||
@@ -172,7 +188,7 @@ app.get('/api/supabase/config', (req, res) => {
 });
 
 // Supabase Connection Test Route
-app.get('/api/supabase/test', async (req, res) => {
+registerGet('/api/supabase/test', async (req, res) => {
   try {
     const rawUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
     const rawKey =
@@ -788,7 +804,7 @@ function fallbackExtractCandidate(rawText: string, fileName: string = '') {
 }
 
 // 1. Intelligent Document Classification & Candidate Extraction (PDF, DOCX, PPTX, TXT)
-app.post('/api/ai/analyze-document', async (req, res) => {
+registerPost('/api/ai/analyze-document', async (req, res) => {
   const { fileName, fileText, base64Data, mimeType } = req.body;
 
   try {
@@ -1147,7 +1163,7 @@ Be strictly factual and precise. Never invent fake or generic data.`;
 });
 
 // Candidate Profile Save to Supabase (Database + Storage)
-app.post('/api/candidates/save', async (req, res) => {
+registerPost('/api/candidates/save', async (req, res) => {
   try {
     const {
       candidateId,
@@ -1194,51 +1210,73 @@ app.post('/api/candidates/save', async (req, res) => {
     };
 
     let candidateRecord: any = null;
+    let saveError: any = null;
 
-    // 1. If candidateId already exists for the current candidate, UPDATE the existing record
+    const payloadVariants = [
+      // 1. Full standard schema
+      { ...candidatePayload },
+      // 2. Schema with 'name' and 'preferred_job_role'
+      {
+        ...candidatePayload,
+        name: trimmedName,
+        preferred_job_role: trimmedRole,
+      },
+      // 3. Fallback without target_job_role
+      {
+        full_name: trimmedName,
+        education: trimmedEducation,
+        experience: trimmedExperience,
+        skills: candidatePayload.skills,
+      },
+      // 4. Fallback with 'name' only
+      {
+        name: trimmedName,
+        education: trimmedEducation,
+        experience: trimmedExperience,
+        skills: candidatePayload.skills,
+      },
+    ];
+
     if (candidateId) {
-      const { data, error } = await supabase
-        .from('candidates')
-        .update(candidatePayload)
-        .eq('id', candidateId)
-        .select()
-        .single();
+      for (const variant of payloadVariants) {
+        const { data, error } = await supabase
+          .from('candidates')
+          .update(variant)
+          .eq('id', candidateId)
+          .select()
+          .single();
 
-      if (error) {
-        console.error('[Supabase Save Error - Update Failed]', error);
-        return res.status(500).json({
-          success: false,
-          error: "We couldn't save your profile. Please try again.",
-          details: error.message || error,
-          code: error.code,
-        });
+        if (!error && data) {
+          candidateRecord = data;
+          saveError = null;
+          break;
+        }
+        saveError = error;
       }
-      candidateRecord = data;
     } else {
-      // 2. Perform real INSERT into candidates table
-      const { data, error } = await supabase
-        .from('candidates')
-        .insert(candidatePayload)
-        .select()
-        .single();
+      for (const variant of payloadVariants) {
+        const { data, error } = await supabase
+          .from('candidates')
+          .insert(variant)
+          .select()
+          .single();
 
-      if (error) {
-        console.error('[Supabase Save Error - Insert Failed]', error);
-        return res.status(500).json({
-          success: false,
-          error: "We couldn't save your profile. Please try again.",
-          details: error.message || error,
-          code: error.code,
-        });
+        if (!error && data) {
+          candidateRecord = data;
+          saveError = null;
+          break;
+        }
+        saveError = error;
       }
-      candidateRecord = data;
     }
 
     if (!candidateRecord || !candidateRecord.id) {
-      console.error('[Supabase Save Error] No candidate record returned after insert/update');
+      console.error('[Supabase Save Error]', saveError);
       return res.status(500).json({
         success: false,
         error: "We couldn't save your profile. Please try again.",
+        details: saveError?.message || 'Database insert/update failed',
+        code: saveError?.code,
       });
     }
 
@@ -1318,7 +1356,7 @@ app.post('/api/candidates/save', async (req, res) => {
 });
 
 // 2. Personalized Career Crash Test, 15 Resume-Grounded MCQs & 3 Project-Based Initial Tasks Generation
-app.post('/api/ai/generate-assessment', async (req, res) => {
+registerPost('/api/ai/generate-assessment', async (req, res) => {
   const { roleTitle, candidateProfile, extractedDetails, documentClassification } = req.body;
 
   try {
@@ -1657,7 +1695,7 @@ Ground all 3 questions directly in the candidate's ACTUAL resume projects: "${pr
 });
 
 // 2.5 Dynamic Initial Task Evaluation (3 Questions: Easy max 10pts, Moderate max 15pts, Hard max 25pts => Total 50pts)
-app.post('/api/ai/evaluate-initial-tasks', async (req, res) => {
+registerPost('/api/ai/evaluate-initial-tasks', async (req, res) => {
   const { roleTitle, candidateProfile, initialTasks, questions, answers } = req.body;
 
   try {
@@ -1993,7 +2031,7 @@ Identify candidate's exact strengths, specific weaknesses, and CONCEPTS REQUIRIN
 });
 
 // 3. Dynamic Assessment Evaluation & Learning Velocity
-app.post('/api/ai/evaluate-assessment', async (req, res) => {
+registerPost('/api/ai/evaluate-assessment', async (req, res) => {
   const {
     roleTitle,
     mcqResults,
@@ -2229,7 +2267,7 @@ SCORING INSTRUCTIONS:
 });
 
 // 4. Workplace Adaptation Plan Route
-app.post('/api/ai/adaptation-plan', async (req, res) => {
+registerPost('/api/ai/adaptation-plan', async (req, res) => {
   const { roleTitle, barrierDescription, currentReadiness, supportNeeds = [] } = req.body;
 
   try {
@@ -2304,15 +2342,24 @@ Calculate:
   }
 });
 
-// Setup Vite or Static serving
+// Mount the API Router for both prefixed (/api) and direct routes
+app.use('/api', apiRouter);
+app.use(apiRouter);
+
+// Setup Vite or Static serving for local & production container environments
 async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
+  if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+    try {
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } catch (viteErr) {
+      console.warn('[Vite Server Init Warning]', viteErr);
+    }
+  } else if (!process.env.VERCEL) {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
