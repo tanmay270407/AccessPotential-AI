@@ -3,28 +3,90 @@ import path from 'path';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createClient } from '@supabase/supabase-js';
-import mammoth from 'mammoth';
-import JSZip from 'jszip';
 
-dotenv.config();
+try {
+  dotenv.config();
+} catch (e) {
+  // Ignore dotenv errors in production/serverless environments
+}
 
+// Lazy loader for mammoth (DOCX parser)
+let mammothModule: any = null;
+async function getMammoth() {
+  if (mammothModule) return mammothModule;
+  try {
+    const mod = await import('mammoth');
+    mammothModule = mod.default || mod;
+  } catch (e) {
+    try {
+      if (typeof require === 'function') {
+        mammothModule = require('mammoth');
+      } else {
+        const { createRequire } = await import('module');
+        // @ts-ignore
+        const metaUrl = typeof import.meta !== 'undefined' ? import.meta.url : null;
+        if (metaUrl) {
+          const req = createRequire(metaUrl);
+          mammothModule = req('mammoth');
+        }
+      }
+    } catch (err2) {
+      console.warn('[DOCX] Could not load mammoth:', err2);
+    }
+  }
+  return mammothModule;
+}
+
+// Lazy loader for JSZip (DOCX/PPTX archive parser)
+let jszipModule: any = null;
+async function getJSZip() {
+  if (jszipModule) return jszipModule;
+  try {
+    const mod = await import('jszip');
+    jszipModule = mod.default || mod;
+  } catch (e) {
+    try {
+      if (typeof require === 'function') {
+        jszipModule = require('jszip');
+      } else {
+        const { createRequire } = await import('module');
+        // @ts-ignore
+        const metaUrl = typeof import.meta !== 'undefined' ? import.meta.url : null;
+        if (metaUrl) {
+          const req = createRequire(metaUrl);
+          jszipModule = req('jszip');
+        }
+      }
+    } catch (err2) {
+      console.warn('[PPTX/DOCX] Could not load jszip:', err2);
+    }
+  }
+  return jszipModule;
+}
+
+// Lazy loader for pdf-parse
 let pdfParseFn: any = null;
 async function getPdfParse() {
   if (pdfParseFn) return pdfParseFn;
   try {
-    if (typeof require === 'function') {
-      pdfParseFn = require('pdf-parse');
-    } else {
-      const { createRequire } = await import('module');
-      // @ts-ignore
-      const metaUrl = typeof import.meta !== 'undefined' ? import.meta.url : null;
-      if (metaUrl) {
-        const req = createRequire(metaUrl);
-        pdfParseFn = req('pdf-parse');
+    const mod: any = await import('pdf-parse');
+    pdfParseFn = mod?.default || mod;
+  } catch (e) {
+    try {
+      if (typeof require === 'function') {
+        pdfParseFn = require('pdf-parse');
+      } else {
+        const { createRequire } = await import('module');
+        // @ts-ignore
+        const metaUrl = typeof import.meta !== 'undefined' ? import.meta.url : null;
+        if (metaUrl) {
+          const req = createRequire(metaUrl);
+          pdfParseFn = req('pdf-parse');
+        }
       }
+    } catch (err) {
+      console.warn('[PDF] Could not load pdf-parse:', err);
     }
-  } catch (err) {
-    console.warn('[PDF] Could not load pdf-parse:', err);
   }
   return pdfParseFn;
 }
@@ -163,23 +225,53 @@ async function generateGeminiJson(
   return null;
 }
 
-// API Routes
-registerGet('/api/health', (req, res) => {
+// API Root Status
+registerGet('/', (req, res) => {
   res.json({
     status: 'ok',
-    hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
-    hasSupabaseUrl: Boolean(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL),
-    hasSupabaseKey: Boolean(
-      process.env.SUPABASE_PUBLISHABLE_KEY ||
-      process.env.SUPABASE_ANON_KEY ||
-      process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
-      process.env.VITE_SUPABASE_ANON_KEY
-    ),
-    hasServiceRoleKey: Boolean(
-      process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY
-    ),
-    time: new Date().toISOString(),
+    service: 'AccessPotential AI Backend',
+    version: '1.0.0',
   });
+});
+
+registerGet('/api', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'AccessPotential AI Backend',
+    version: '1.0.0',
+  });
+});
+
+// API Health Check
+registerGet('/api/health', (req, res) => {
+  try {
+    res.json({
+      status: 'ok',
+      hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
+      hasSupabaseUrl: Boolean(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL),
+      hasSupabaseKey: Boolean(
+        process.env.SUPABASE_PUBLISHABLE_KEY ||
+        process.env.SUPABASE_ANON_KEY ||
+        process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+        process.env.VITE_SUPABASE_ANON_KEY
+      ),
+      hasServiceRoleKey: Boolean(
+        process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY
+      ),
+      isServerless: Boolean(
+        process.env.VERCEL ||
+        process.env.VERCEL_ENV ||
+        process.env.NOW_REGION ||
+        process.env.AWS_LAMBDA_FUNCTION_NAME
+      ),
+      time: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    res.status(200).json({
+      status: 'ok',
+      time: new Date().toISOString(),
+    });
+  }
 });
 
 // Public Supabase configuration endpoint (only exposes public URL and Publishable/Anon key, NEVER service role key)
@@ -288,7 +380,12 @@ function decodeXmlEntities(str: string): string {
 // Helper to extract text from PPTX / PPT files using JSZip
 async function extractPptxText(buffer: Buffer): Promise<string> {
   try {
-    const zip = await JSZip.loadAsync(buffer);
+    const JSZipClass = await getJSZip();
+    if (!JSZipClass) {
+      console.warn('[PPTX Extract] JSZip not available');
+      return '';
+    }
+    const zip = await JSZipClass.loadAsync(buffer);
     const slideFiles = Object.keys(zip.files)
       .filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
       .sort((a, b) => {
@@ -334,9 +431,12 @@ async function extractPptxText(buffer: Buffer): Promise<string> {
 // Helper to extract text from DOCX using mammoth + JSZip fallback
 async function extractDocxText(buffer: Buffer): Promise<string> {
   try {
-    const docResult = await mammoth.extractRawText({ buffer });
-    if (docResult && docResult.value && docResult.value.trim().length > 10) {
-      return docResult.value.trim();
+    const mammothLib = await getMammoth();
+    if (mammothLib && typeof mammothLib.extractRawText === 'function') {
+      const docResult = await mammothLib.extractRawText({ buffer });
+      if (docResult && docResult.value && docResult.value.trim().length > 10) {
+        return docResult.value.trim();
+      }
     }
   } catch (err) {
     console.warn('[DOCX Extract] mammoth primary extractor notice:', err);
@@ -344,18 +444,21 @@ async function extractDocxText(buffer: Buffer): Promise<string> {
 
   // JSZip fallback for DOCX
   try {
-    const zip = await JSZip.loadAsync(buffer);
-    const docXml = await zip.file('word/document.xml')?.async('string');
-    if (docXml) {
-      const pMatches = docXml.match(/<w:p[\s\S]*?<\/w:p>/gi) || [];
-      const lines: string[] = [];
-      for (const pXml of pMatches) {
-        const tMatches = pXml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/gi) || [];
-        const line = tMatches.map((t) => decodeXmlEntities(t.replace(/<\/?w:t[^>]*>/gi, ''))).join('');
-        if (line.trim()) lines.push(line.trim());
-      }
-      if (lines.length > 0) {
-        return lines.join('\n');
+    const JSZipClass = await getJSZip();
+    if (JSZipClass) {
+      const zip = await JSZipClass.loadAsync(buffer);
+      const docXml = await zip.file('word/document.xml')?.async('string');
+      if (docXml) {
+        const pMatches = docXml.match(/<w:p[\s\S]*?<\/w:p>/gi) || [];
+        const lines: string[] = [];
+        for (const pXml of pMatches) {
+          const tMatches = pXml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/gi) || [];
+          const line = tMatches.map((t) => decodeXmlEntities(t.replace(/<\/?w:t[^>]*>/gi, ''))).join('');
+          if (line.trim()) lines.push(line.trim());
+        }
+        if (lines.length > 0) {
+          return lines.join('\n');
+        }
       }
     }
   } catch (err) {
@@ -2391,14 +2494,18 @@ async function startServer() {
   });
 }
 
-// Only start the HTTP listener if not running in a Vercel serverless function or unit test
-if (
-  !process.env.VERCEL &&
-  !process.env.VERCEL_ENV &&
-  !process.env.NOW_REGION &&
-  !process.env.AWS_LAMBDA_FUNCTION_NAME &&
-  process.env.NODE_ENV !== 'test'
-) {
+// Detect Vercel serverless / AWS Lambda environment
+const isServerless = Boolean(
+  process.env.VERCEL ||
+  process.env.VERCEL_ENV ||
+  process.env.NOW_REGION ||
+  process.env.AWS_LAMBDA_FUNCTION_NAME ||
+  process.env.LAMBDA_TASK_ROOT ||
+  process.env._HANDLER
+);
+
+// Only start the standalone HTTP listener if run directly and not in a serverless environment
+if (!isServerless && process.env.NODE_ENV !== 'test') {
   startServer();
 }
 
