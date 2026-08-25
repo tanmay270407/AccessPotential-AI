@@ -88,15 +88,28 @@ function registerPost(routePath: string, handler: express.RequestHandler) {
   apiRouter.post(`/api${rootPath}`, handler);
 }
 
-// Initialize Gemini SDK
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    },
-  },
-});
+// Initialize Gemini SDK lazily to prevent module load crash in serverless functions if key is missing
+let aiClientInstance: GoogleGenAI | null = null;
+function getGeminiAI(): GoogleGenAI | null {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) return null;
+  if (!aiClientInstance) {
+    try {
+      aiClientInstance = new GoogleGenAI({
+        apiKey: key,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          },
+        },
+      });
+    } catch (err) {
+      console.warn('[Gemini SDK Init Warning]', err);
+      return null;
+    }
+  }
+  return aiClientInstance;
+}
 
 // Helper to call Gemini with multi-model fallback and optional inlineData
 async function generateGeminiJson(
@@ -104,7 +117,8 @@ async function generateGeminiJson(
   responseSchema: any,
   systemInstruction?: string
 ) {
-  if (!process.env.GEMINI_API_KEY) {
+  const geminiAI = getGeminiAI();
+  if (!geminiAI) {
     return null;
   }
 
@@ -126,7 +140,7 @@ async function generateGeminiJson(
         payload = { parts: contents };
       }
 
-      const response = await ai.models.generateContent({
+      const response = await geminiAI.models.generateContent({
         model,
         contents: payload,
         config,
@@ -210,7 +224,12 @@ registerGet('/api/supabase/test', async (req, res) => {
     }
 
     const normalizedUrl = normalizeSupabaseUrl(rawUrl);
-    const client = createClient(normalizedUrl, rawKey);
+    const client = createClient(normalizedUrl, rawKey, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
+    });
 
     // Simple query against the database (tests actual network and auth handshake)
     const { data, error, status } = await client.from('candidates').select('id').limit(1);
@@ -2373,7 +2392,13 @@ async function startServer() {
 }
 
 // Only start the HTTP listener if not running in a Vercel serverless function or unit test
-if (!process.env.VERCEL && process.env.NODE_ENV !== 'test') {
+if (
+  !process.env.VERCEL &&
+  !process.env.VERCEL_ENV &&
+  !process.env.NOW_REGION &&
+  !process.env.AWS_LAMBDA_FUNCTION_NAME &&
+  process.env.NODE_ENV !== 'test'
+) {
   startServer();
 }
 
